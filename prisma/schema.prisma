@@ -1,0 +1,121 @@
+generator client {
+  provider     = "prisma-client"
+  output       = "../generated/prisma"
+  moduleFormat = "cjs"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum Role {
+  CUSTOMER
+  OWNER
+  ADMIN
+}
+
+enum EquipmentStatus {
+  PENDING
+  PUBLISHED
+  REJECTED
+  ARCHIVED
+}
+
+enum RequestStatus {
+  SUBMITTED
+  QUOTED
+  ACCEPTED
+  DECLINED
+  CANCELLED
+}
+
+model User {
+  id           String    @id @default(cuid())
+  name         String
+  email        String    @unique
+  passwordHash String
+  role         Role      @default(CUSTOMER)
+  createdAt    DateTime  @default(now())
+  sessions     Session[]
+  equipment    Equipment[]
+  saved        SavedEquipment[]
+  requests     RentalRequest[]
+}
+
+model Session {
+  id        String   @id @default(cuid())
+  tokenHash String   @unique
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+model Equipment {
+  id          Int             @id @default(autoincrement())
+  ownerId     String
+  owner       User            @relation(fields: [ownerId], references: [id])
+  name        String
+  category    String
+  location    String
+  rate        Int
+  image       String          @default("")
+  capacity    String
+  operator    Boolean         @default(false)
+  available   Boolean         @default(true)
+  vendor      String
+  description String
+  status      EquipmentStatus @default(PENDING)
+  createdAt   DateTime        @default(now())
+  updatedAt   DateTime        @updatedAt
+  saved       SavedEquipment[]
+  requests    RentalRequest[]
+  @@index([status, category, id])
+  @@index([ownerId])
+}
+
+model SavedEquipment {
+  userId      String
+  equipmentId Int
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  equipment   Equipment @relation(fields: [equipmentId], references: [id], onDelete: Cascade)
+  createdAt   DateTime  @default(now())
+  @@id([userId, equipmentId])
+}
+
+model RentalRequest {
+  id           String        @id @default(cuid())
+  userId       String
+  user         User          @relation(fields: [userId], references: [id])
+  equipmentId  Int?
+  equipment    Equipment?    @relation(fields: [equipmentId], references: [id])
+  title        String
+  service      String
+  location     String
+  start        String
+  days         Int
+  name         String
+  email        String
+  notes        String        @default("")
+  estimate     Float?
+  status       RequestStatus @default(SUBMITTED)
+  quotedAmount Float?
+  quoteNotes   String?
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+  @@index([userId, createdAt])
+  @@index([equipmentId])
+}
+
+model WaitlistEntry {
+  id         String   @id @default(cuid())
+  name       String
+  phone      String   @unique
+  email      String?
+  role       String?
+  wantToRent String[]
+  wantToList String[]
+  createdAt  DateTime @default(now())
+}
