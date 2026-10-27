@@ -63,5 +63,8 @@
     "modulePathIgnorePatterns": [
       "<rootDir>/dist/"
     ]
+  },
+  "overrides": {
+    "multer": "2.5.0"
   }
 }

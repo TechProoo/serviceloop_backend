@@ -16,6 +16,8 @@ describe('ServiceLoop HTTP API with Prisma and PostgreSQL (PGlite)', () => {
   const password = 'a-long-secure-password';
   beforeAll(async () => {
     db = await PGlite.create();
+    // Simulate Supabase's browser roles and permissive legacy default grants.
+    await db.exec('CREATE ROLE anon; CREATE ROLE authenticated; ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO anon, authenticated; ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO anon, authenticated;');
     const migrations = join(__dirname, '../prisma/migrations');
     for (const entry of readdirSync(migrations, { withFileTypes: true }).filter(entry => entry.isDirectory()).sort((a,b) => a.name.localeCompare(b.name))) {
       await db.exec(readFileSync(join(migrations, entry.name, 'migration.sql'), 'utf8'));
@@ -31,6 +33,18 @@ describe('ServiceLoop HTTP API with Prisma and PostgreSQL (PGlite)', () => {
   afterAll(async () => { if (app) await app.close(); if (socket) await socket.stop(); if (db) await db.close(); });
   const api = () => request(app.getHttpServer());
   const token = (value: string) => `Bearer ${value}`;
+
+  it('protects all application tables from direct Supabase browser-role access', async () => {
+    const tables = ['User','Session','Equipment','SavedEquipment','RentalRequest','WaitlistEntry'];
+    const protection = await prisma.$queryRaw<{ tablename: string; rowsecurity: boolean }[]>`SELECT tablename, rowsecurity FROM pg_tables WHERE schemaname='public'`;
+    for (const table of tables) {
+      expect(protection.find(row => row.tablename === table)?.rowsecurity).toBe(true);
+      for (const role of ['anon','authenticated']) {
+        const grants = await prisma.$queryRaw<{ accessible: boolean }[]>`SELECT has_table_privilege(${role}, ${'public."' + table + '"'}, 'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER') AS accessible`;
+        expect(grants[0].accessible).toBe(false);
+      }
+    }
+  });
 
   it('validates registration and prevents self-assigned administrator roles', async () => {
     await api().post('/api/auth/register').send({ name: 'Admin', email: 'bad@example.com', password, role: 'ADMIN' }).expect(400);
@@ -63,6 +77,33 @@ describe('ServiceLoop HTTP API with Prisma and PostgreSQL (PGlite)', () => {
     expect((await api().get('/api/equipment?q=cat&location=Lagos&available=true&sort=price_asc').expect(200)).body.total).toBe(1);
     await api().get('/api/equipment?sort=__proto__').expect(400);
     await api().get('/api/equipment?limit=101').expect(400);
+  });
+
+  it('rejects invalid equipment IDs across public, owner, saved and admin routes', async () => {
+    for (const id of ['0','-1','2147483648','999999999999999999999999','1.2','bad']) {
+      await api().get(`/api/equipment/${id}`).expect(400);
+      await api().patch(`/api/equipment/${id}`).set('Authorization', token(owner)).send({ rate: 1000 }).expect(400);
+      await api().delete(`/api/equipment/${id}`).set('Authorization', token(owner)).expect(400);
+      await api().put(`/api/me/saved/${id}`).set('Authorization', token(customer)).expect(400);
+      await api().delete(`/api/me/saved/${id}`).set('Authorization', token(customer)).expect(400);
+      await api().patch(`/api/admin/equipment/${id}`).set('Authorization', token(admin)).send({ status: 'PUBLISHED' }).expect(400);
+    }
+    await api().get('/api/equipment/2147483647').expect(404);
+  });
+
+  it('handles general project requests, ownership and admin quoting without equipment', async () => {
+    const body = { title: 'Site clearing', service: 'Site clearing & preparation', location: 'Lagos', start: new Date(Date.now() + 86400000).toISOString().slice(0,10), days: 2 };
+    const created = await api().post('/api/requests').set('Authorization', token(customer)).send(body).expect(201);
+    expect(created.body.equipmentId).toBeNull(); expect(created.body.estimate).toBeNull();
+    await api().patch(`/api/requests/${created.body.id}`).set('Authorization', token(owner)).send({ status: 'QUOTED', quotedAmount: 20000 }).expect(403);
+    await api().patch(`/api/requests/${created.body.id}`).set('Authorization', token(admin)).send({ status: 'QUOTED', quotedAmount: 20000 }).expect(200);
+    await api().patch(`/api/requests/${created.body.id}`).set('Authorization', token(customer)).send({ status: 'DECLINED' }).expect(200);
+  });
+
+  it('returns validation errors for nulls, unexpected fields and oversized bodies', async () => {
+    await api().get('/api/equipment?unknown=value').expect(400);
+    await api().post('/api/auth/register').send({ name: null, email: 'invalid', password: null }).expect(400);
+    await api().post('/api/requests').set('Authorization', token(customer)).send({ title: 'Work', location: 'Lagos', start: '2027-01-01', days: 1, notes: 'x'.repeat(70000) }).expect(413);
   });
 
   it('saves listings idempotently and keeps saved lists private', async () => {

@@ -16,6 +16,6 @@ npm start
 
 The committed migrations create the ServiceLoop tables. Check that this is the intended database before applying them. The optional local Docker database remains available through the original `.env.example`.
 
-No live connection or database migration has been attempted because the supplied URLs contain a password placeholder.
+Verified October 27, 2026: both Supabase connection modes work and all three ServiceLoop migrations have been applied. The six application tables have row-level security enabled and no direct browser-role access. See BACKEND_VERIFICATION.md for the test results.
 
 References: [Supabase Prisma guide](https://supabase.com/docs/guides/database/prisma), [pooler connection modes](https://supabase.com/docs/guides/database/connecting-to-postgres).

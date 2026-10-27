@@ -1,4 +1,5 @@
-import { Body, Controller, Get, Param, ParseIntPipe, Patch, Query, UseGuards } from '@nestjs/common';
+import { EquipmentIdPipe } from '../common/equipment-id.pipe';
+import { Body, Controller, Get, Param, Patch, Query, UseGuards } from '@nestjs/common';
 import { AdminGuard, AuthGuard } from '../auth/auth.guard';
 import { PrismaService } from '../prisma/prisma.service';
 import { EquipmentService, equipmentSelect } from '../equipment/equipment.service';
@@ -14,7 +15,7 @@ export class AdminController {
       this.prisma.equipment.count(),
     ]); return { items, total };
   }
-  @Patch('equipment/:id') moderate(@Param('id', ParseIntPipe) id: number, @Body() dto: ModerateEquipmentDto) { return this.equipment.moderate(id, dto); }
+  @Patch('equipment/:id') moderate(@Param('id', EquipmentIdPipe) id: number, @Body() dto: ModerateEquipmentDto) { return this.equipment.moderate(id, dto); }
   @Get('requests') async requests(@Query() query: PageDto) {
     const [items, total] = await this.prisma.$transaction([
       this.prisma.rentalRequest.findMany({ select: requestSelect, take: query.limit, skip: query.offset, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }] }),
