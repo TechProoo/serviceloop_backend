@@ -9,10 +9,11 @@ import { join } from 'node:path';
 import { AppModule } from '../src/app.module';
 import { configureApp } from '../src/setup';
 import { PrismaService } from '../src/prisma/prisma.service';
+import { BookingsService } from '../src/bookings/bookings.service';
 
 describe('ServiceLoop HTTP API with Prisma and PostgreSQL (PGlite)', () => {
   let app: INestApplication, db: PGlite, socket: PGLiteSocketServer, prisma: PrismaService;
-  let owner: string, customer: string, stranger: string, admin: string, equipmentId: number, requestId: string;
+  let owner: string, customer: string, stranger: string, admin: string, equipmentId: number, requestId: string, bookingId: string;
   const password = 'a-long-secure-password';
   beforeAll(async () => {
     db = await PGlite.create();
@@ -35,7 +36,7 @@ describe('ServiceLoop HTTP API with Prisma and PostgreSQL (PGlite)', () => {
   const token = (value: string) => `Bearer ${value}`;
 
   it('protects all application tables from direct Supabase browser-role access', async () => {
-    const tables = ['User','Session','Equipment','SavedEquipment','RentalRequest','WaitlistEntry'];
+    const tables = ['User','Session','Equipment','SavedEquipment','RentalRequest','WaitlistEntry','Booking'];
     const protection = await prisma.$queryRaw<{ tablename: string; rowsecurity: boolean }[]>`SELECT tablename, rowsecurity FROM pg_tables WHERE schemaname='public'`;
     for (const table of tables) {
       expect(protection.find(row => row.tablename === table)?.rowsecurity).toBe(true);
@@ -98,6 +99,7 @@ describe('ServiceLoop HTTP API with Prisma and PostgreSQL (PGlite)', () => {
     await api().patch(`/api/requests/${created.body.id}`).set('Authorization', token(owner)).send({ status: 'QUOTED', quotedAmount: 20000 }).expect(403);
     await api().patch(`/api/requests/${created.body.id}`).set('Authorization', token(admin)).send({ status: 'QUOTED', quotedAmount: 20000 }).expect(200);
     await api().patch(`/api/requests/${created.body.id}`).set('Authorization', token(customer)).send({ status: 'DECLINED' }).expect(200);
+    expect(await prisma.booking.count({ where: { requestId: created.body.id } })).toBe(0);
   });
 
   it('returns validation errors for nulls, unexpected fields and oversized bodies', async () => {
@@ -122,10 +124,69 @@ describe('ServiceLoop HTTP API with Prisma and PostgreSQL (PGlite)', () => {
     await api().get(`/api/requests/${requestId}`).set('Authorization', token(stranger)).expect(403);
     await api().patch(`/api/requests/${requestId}`).set('Authorization', token(customer)).send({ status: 'ACCEPTED' }).expect(409);
     await api().patch(`/api/requests/${requestId}`).set('Authorization', token(customer)).send({ status: 'QUOTED', quotedAmount: 600000 }).expect(403);
-    await api().patch(`/api/requests/${requestId}`).set('Authorization', token(owner)).send({ status: 'QUOTED', quotedAmount: 600000 }).expect(200);
-    await api().patch(`/api/requests/${requestId}`).set('Authorization', token(customer)).send({ status: 'ACCEPTED' }).expect(200);
+    await api().patch(`/api/requests/${requestId}`).set('Authorization', token(owner)).send({ status: 'QUOTED', quotedAmount: 600000, quoteNotes: 'Delivery and operator included. Fuel supplied by renter.' }).expect(200);
+    const accepted = await api().patch(`/api/requests/${requestId}`).set('Authorization', token(customer)).send({ status: 'ACCEPTED' }).expect(200);
+    bookingId = accepted.body.booking.id;
+    expect(accepted.body.booking.reference).toMatch(/^SL-[A-F0-9]{12}$/);
     await api().patch(`/api/requests/${requestId}`).set('Authorization', token(owner)).send({ status: 'QUOTED', quotedAmount: 1 }).expect(409);
     expect((await api().get('/api/requests').set('Authorization', token(stranger))).body.total).toBe(0);
+  });
+
+  it('saves private, immutable booking details and makes acceptance retries idempotent', async () => {
+    const booking = (await api().get(`/api/bookings/${bookingId}`).set('Authorization', token(customer)).expect(200)).body;
+    expect(booking).toMatchObject({ requestId, equipmentId, title: 'CAT Excavator', agreedAmount: 600000, currency: 'NGN', days: 3, status: 'AWAITING_CONFIRMATION', vendor: 'Atlas', ownerEmail: 'owner@example.com', renterEmail: 'customer@example.com', terms: 'Delivery and operator included. Fuel supplied by renter.', imported: false });
+    expect(Date.parse(booking.end) - Date.parse(booking.start)).toBe(2 * 86400000);
+    await api().get('/api/bookings').expect(401);
+    await api().get(`/api/bookings/${bookingId}`).expect(401);
+    await api().get(`/api/bookings/${bookingId}`).set('Authorization', token(stranger)).expect(404);
+    await api().get('/api/bookings/missing').set('Authorization', token(customer)).expect(404);
+    expect((await api().get('/api/bookings').set('Authorization', token(stranger))).body.total).toBe(0);
+    for (const account of [owner, customer, admin]) {
+      expect((await api().get('/api/bookings?limit=1&offset=0').set('Authorization', token(account)).expect(200)).body.items[0].id).toBe(bookingId);
+      expect((await api().get(`/api/bookings/${bookingId}`).set('Authorization', token(account)).expect(200)).body).toEqual({ ...booking, serverTime: expect.any(String) });
+    }
+    expect((await api().get('/api/bookings?limit=1&offset=1').set('Authorization', token(customer)).expect(200)).body.items).toHaveLength(0);
+    await api().get('/api/bookings?limit=101').set('Authorization', token(customer)).expect(400);
+    const retry = await api().patch(`/api/requests/${requestId}`).set('Authorization', token(customer)).send({ status: 'ACCEPTED' }).expect(200);
+    expect(retry.body.booking.id).toBe(bookingId);
+    expect(await prisma.booking.count({ where: { requestId } })).toBe(1);
+    await api().patch(`/api/requests/${requestId}`).set('Authorization', token(owner)).send({ status: 'ACCEPTED' }).expect(403);
+    await api().patch(`/api/bookings/${bookingId}`).set('Authorization', token(customer)).send({ agreedAmount: 1 }).expect(404);
+    await prisma.equipment.update({ where: { id: equipmentId }, data: { name: 'Renamed excavator', rate: 220000, vendor: 'New vendor', operator: false } });
+    expect((await api().get(`/api/bookings/${bookingId}`).set('Authorization', token(owner)).expect(200)).body).toEqual({ ...booking, serverTime: expect.any(String) });
+    // A date-specific hold must not disable the listing for all other dates.
+    expect((await prisma.equipment.findUniqueOrThrow({ where: { id: equipmentId } })).available).toBe(true);
+  });
+
+  it('rejects stale quote acceptance and rolls back the decision when booking creation fails', async () => {
+    const created = await api().post('/api/requests').set('Authorization', token(customer)).send({ equipmentId, location: 'Lagos', start: '2028-02-28', days: 3 }).expect(201);
+    const id = created.body.id;
+    const earlierQuote = await api().patch(`/api/requests/${id}`).set('Authorization', token(owner)).send({ status: 'QUOTED', quotedAmount: 90000 }).expect(200);
+    const quote = await api().patch(`/api/requests/${id}`).set('Authorization', token(owner)).send({ status: 'QUOTED', quotedAmount: 10000000000 }).expect(200);
+    await api().patch(`/api/requests/${id}`).set('Authorization', token(customer)).send({ status: 'ACCEPTED', expectedUpdatedAt: earlierQuote.body.updatedAt }).expect(409);
+    expect(await prisma.booking.count({ where: { requestId: id } })).toBe(0);
+    const failing = jest.spyOn(app.get(BookingsService), 'record').mockRejectedValueOnce(new Error('Test booking write failure'));
+    try { await api().patch(`/api/requests/${id}`).set('Authorization', token(customer)).send({ status: 'ACCEPTED', expectedUpdatedAt: quote.body.updatedAt }).expect(500); }
+    finally { failing.mockRestore(); }
+    expect((await prisma.rentalRequest.findUniqueOrThrow({ where: { id } })).status).toBe('QUOTED');
+    expect(await prisma.booking.count({ where: { requestId: id } })).toBe(0);
+    const accepted = await api().patch(`/api/requests/${id}`).set('Authorization', token(customer)).send({ status: 'ACCEPTED', expectedUpdatedAt: quote.body.updatedAt }).expect(200);
+    const booking = (await api().get(`/api/bookings/${accepted.body.booking.id}`).set('Authorization', token(customer))).body;
+    expect(booking.end).toBe('2028-03-01'); expect(booking.agreedAmount).toBe(10000000000);
+  });
+
+  it('creates one booking under concurrent acceptance and supports general service quotes', async () => {
+    const created = await api().post('/api/requests').set('Authorization', token(customer)).send({ title: 'Site clearing', service: 'Site clearing & preparation', location: 'Lagos', start: '2028-12-31', days: 1 }).expect(201);
+    const id = created.body.id;
+    await api().patch(`/api/requests/${id}`).set('Authorization', token(admin)).send({ status: 'QUOTED', quotedAmount: 90000 }).expect(200);
+    const responses = await Promise.all([1,2].map(() => api().patch(`/api/requests/${id}`).set('Authorization', token(customer)).send({ status: 'ACCEPTED' })));
+    expect(responses.some(response => response.status === 200)).toBe(true);
+    expect(responses.every(response => [200,409].includes(response.status))).toBe(true);
+    expect(await prisma.booking.count({ where: { requestId: id } })).toBe(1);
+    const booking = await prisma.booking.findUniqueOrThrow({ where: { requestId: id } });
+    expect(booking).toMatchObject({ equipmentId: null, ownerId: null, vendor: 'ServiceLoop team', terms: '', start: '2028-12-31', end: '2028-12-31' });
+    await api().get(`/api/bookings/${booking.id}`).set('Authorization', token(admin)).expect(200);
+    await api().get(`/api/bookings/${booking.id}`).set('Authorization', token(owner)).expect(404);
   });
 
   it('deduplicates waitlist phone numbers without anonymous overwrites or membership disclosure', async () => {
@@ -142,6 +203,7 @@ describe('ServiceLoop HTTP API with Prisma and PostgreSQL (PGlite)', () => {
     await api().delete(`/api/equipment/${equipmentId}`).set('Authorization', token(owner)).expect(200);
     expect((await api().get('/api/equipment')).body.total).toBe(0);
     expect((await api().get(`/api/requests/${requestId}`).set('Authorization', token(customer))).body.status).toBe('ACCEPTED');
+    expect((await api().get(`/api/bookings/${bookingId}`).set('Authorization', token(customer)).expect(200)).body.title).toBe('CAT Excavator');
     await api().patch(`/api/admin/equipment/${equipmentId}`).set('Authorization', token(admin)).send({ status: 'PUBLISHED' }).expect(409);
   });
 

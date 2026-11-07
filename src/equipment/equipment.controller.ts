@@ -2,13 +2,15 @@ import { EquipmentIdPipe } from '../common/equipment-id.pipe';
 import { Body, Controller, Delete, Get, Param, Patch, Post, Put, Query, UseGuards } from '@nestjs/common';
 import { User } from '../../generated/prisma/client';
 import { AuthGuard, CurrentUser } from '../auth/auth.guard';
-import { CreateEquipmentDto, EquipmentQueryDto, PageDto, UpdateEquipmentDto } from '../common/dto';
+import { AvailabilityDto, CreateEquipmentDto, EquipmentQueryDto, PageDto, UpdateEquipmentDto } from '../common/dto';
 import { EquipmentService } from './equipment.service';
+import { BookingsService } from '../bookings/bookings.service';
 
 @Controller('equipment')
 export class EquipmentController {
-  constructor(private readonly service: EquipmentService) {}
+  constructor(private readonly service: EquipmentService, private readonly bookings: BookingsService) {}
   @Get() list(@Query() query: EquipmentQueryDto) { return this.service.list(query); }
+  @Get(':id/availability') availability(@Param('id', EquipmentIdPipe) id: number, @Query() query: AvailabilityDto) { return this.bookings.availability(id, query); }
   @Get(':id') detail(@Param('id', EquipmentIdPipe) id: number) { return this.service.detail(id); }
   @Post() @UseGuards(AuthGuard)
   create(@CurrentUser() user: User, @Body() dto: CreateEquipmentDto) { return this.service.create(user, dto); }

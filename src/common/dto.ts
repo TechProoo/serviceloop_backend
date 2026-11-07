@@ -13,6 +13,10 @@ export class PageDto {
   @ValidateIf((_object, value) => value !== undefined) @Type(() => Number) @IsInt() @Min(1) @Max(100) limit = 20;
   @ValidateIf((_object, value) => value !== undefined) @Type(() => Number) @IsInt() @Min(0) @Max(1000000) offset = 0;
 }
+export class AvailabilityDto {
+  @Matches(/^\d{4}-\d{2}-\d{2}$/) start!: string;
+  @Type(() => Number) @IsInt() @Min(1) @Max(365) days!: number;
+}
 export class EquipmentQueryDto extends PageDto {
   @ValidateIf((_object, value) => value !== undefined) @Trim() @IsString() @Length(1, 150) q?: string;
   @ValidateIf((_object, value) => value !== undefined) @IsIn(CATEGORIES) category?: string;
@@ -56,6 +60,7 @@ export class UpdateRequestDto {
   @IsIn(['QUOTED', 'ACCEPTED', 'DECLINED', 'CANCELLED']) status!: 'QUOTED' | 'ACCEPTED' | 'DECLINED' | 'CANCELLED';
   @ValidateIf((_object, value) => value !== undefined) @IsInt() @Min(1) @Max(10000000000) quotedAmount?: number;
   @ValidateIf((_object, value) => value !== undefined) @Trim() @IsString() @MaxLength(2000) quoteNotes?: string;
+  @ValidateIf((_object, value) => value !== undefined) @IsString() @Matches(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/) expectedUpdatedAt?: string;
 }
 export class WaitlistDto {
   @ValidateIf((_object, value) => value !== undefined) @Trim() @IsEmail() @MaxLength(254) email?: string;

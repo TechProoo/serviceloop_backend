@@ -127,7 +127,39 @@ Equipment owners or admins quote using:
 { "status": "QUOTED", "quotedAmount": 600000, "quoteNotes": "Includes delivery" }
 ```
 
-The requester can then send `{ "status": "ACCEPTED" }`, `DECLINED` or `CANCELLED`. Submitted requests can also be cancelled before quoting. Terminal states cannot be changed. Updates check the prior version so concurrent changes cannot silently overwrite each other. Acceptance records a quote decision; it does not collect payment or reserve dates.
+The requester can then send `{ "status": "ACCEPTED", "expectedUpdatedAt": "<quote updatedAt>" }`, `DECLINED` or `CANCELLED`. The optional version is supplied by the frontend to prevent accepting a quote revised since it was displayed. Submitted requests can also be cancelled before quoting. Terminal states cannot be changed; retrying acceptance returns the same booking. Updates check the prior version so concurrent changes cannot silently overwrite each other.
+
+### Booking details
+
+Accepting a quote creates its booking in the same database transaction. A failed booking write leaves the request quoted. Each request has at most one booking, and acceptance returns `booking: { id, reference }` alongside the request. Request list/detail responses include this link (`null` before acceptance).
+
+- `GET /api/bookings?limit=20&offset=0` lists bookings belonging to the signed-in renter or owner. Administrators can list all bookings.
+- `GET /api/bookings/:id` returns the agreed details to those same parties. Other accounts and nonexistent IDs receive 404; unauthenticated requests receive 401.
+- Booking references use `SL-` followed by 12 uppercase hexadecimal characters. Internal IDs remain opaque strings.
+- Equipment specifications, provider/renter contacts, location, agreed price (whole NGN), quote terms and project notes are stored as snapshots. Later listing edits or archiving do not alter them.
+- `start` and `end` are inclusive calendar dates: `end = start + days - 1`. Handover times are not assumed. General service quotes have no equipment/owner ID and use ServiceLoop as provider.
+- Status starts as `AWAITING_CONFIRMATION`. Cancelling changes it to `CANCELLED` and preserves the accepted quote details. Equipment bookings also have a separate temporary date-reservation state; payment and final rental confirmation are not implemented yet.
+
+Deploy migration `20261106000000_booking_details` with `npm run db:deploy` before starting the new API/frontend. It also creates booking records for earlier accepted quotes. Their `imported` flag indicates equipment/contact details reflect migration-time data; the agreed quote amount, dates and terms are retained. Booking tables have the same RLS and browser-role restrictions as the other API tables.
+
+Tests cover access controls, pagination, retained details after listing changes/archiving, duplicate and concurrent acceptance, stale quotes, transaction rollback, leap-year/single-day dates, general service quotes and migration of older agreements.
+
+### Date reservations
+
+Accepting an equipment quote creates a **2-hour hold** on every rental day, including the first and last day. Requests themselves do not reserve equipment. Acceptance rechecks listing availability and overlapping holds; if a conflict is found it returns 409 and the request stays quoted, with no booking created. The equipment's general `available` flag is not changed, so other dates remain bookable.
+
+- `GET /api/equipment/:id/availability?start=YYYY-MM-DD&days=3` is public and checks the full interval. It returns `available`, `reason` (`RESERVED`, `UNAVAILABLE`, or `null`), the requested start/end, `checkedAt`, and `holdHours: 2`. It never returns another renter's booking or contact details. This is an availability check, not a guarantee or reservation.
+- `POST /api/bookings/:id/reserve` lets the renter (or an administrator) reserve an older unreserved booking or retry after expiry. It checks dates and availability again. Retrying a live hold returns its original deadline; it does not extend the hold. Cancelled bookings cannot be reserved again. Owners cannot initiate holds on behalf of renters.
+- `POST /api/bookings/:id/cancel` lets the renter, owner, or administrator cancel and release the dates immediately. Repeating cancellation preserves the original cancellation time. The original request remains accepted as a record of the quote decision.
+- Responses include `reservedAt`, `reservationExpiresAt`, `cancelledAt`, `reservationState`, `serverTime`, and `holdHours`. States are `NONE`, `HELD`, `EXPIRED`, `CANCELLED`, and `NOT_APPLICABLE` (general service quotes without equipment).
+
+Expiry is based on the database clock: only uncancelled holds whose deadline is still in the future block availability. No browser, timer job, or background worker is required to release expired dates. The frontend shows a countdown using server time and refreshes when the window regains focus. A new hold after expiry is subject to availability.
+
+Hold/cancel mutations serialize on the equipment row using `FOR NO KEY UPDATE` in a `READ COMMITTED` transaction. This lock conflicts with other holds while allowing the key-share locks from request/booking foreign keys. The overlap query runs after acquiring the lock, using fresh database time. Future payment/confirmation code must use this same locking path when turning a temporary hold into a confirmed reservation.
+
+Apply `20261106010000_date_reservations` with `npm run db:deploy`, then rebuild/restart the API before using the updated frontend. Existing accepted bookings remain unreserved and can request a hold explicitly; migrating them does not silently block dates. Date validation uses Nigeria time and whole inclusive calendar days. Rentals on the day immediately after another rental ends do not overlap.
+
+Reservation integration tests cover overlapping ranges, shared end dates, adjacent rentals, competing acceptances, exactly two-hour deadlines, idempotent retries, expiry without browser activity, cancellation, authorization, archived/unavailable inventory, and earlier unreserved records. They use a disposable PGlite database; no live data is modified.
 
 ### Waitlist
 
@@ -154,6 +186,6 @@ Use a persistent PostgreSQL database and HTTPS reverse proxy. Set `DATABASE_URL`
 
 Validation rejects unknown fields and invalid types. JSON bodies are limited to 64 KiB. Helmet adds security headers. Rate limits are in memory per process: use edge limits or shared storage when scaling. The application does not trust arbitrary forwarding headers, so configure proxy-aware limits at your edge. Errors omit internal database details. CORS restricts browser origins; it is not authentication.
 
-Payments/escrow, confirmed rental reservations, identity verification, file uploads, password recovery and provider notifications are not implemented. No emails or provider messages are sent when a request is submitted.
+Payments/escrow, conversion of temporary holds into confirmed rentals, identity verification, file uploads, password recovery and provider notifications are not implemented. No emails or provider messages are sent when a request is submitted.
 #   s e r v i c e l o o p _ b a c k e n d  
  

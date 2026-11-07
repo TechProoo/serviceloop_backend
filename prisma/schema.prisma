@@ -29,6 +29,11 @@ enum RequestStatus {
   CANCELLED
 }
 
+enum BookingStatus {
+  AWAITING_CONFIRMATION
+  CANCELLED
+}
+
 model User {
   id           String    @id @default(cuid())
   name         String
@@ -40,6 +45,8 @@ model User {
   equipment    Equipment[]
   saved        SavedEquipment[]
   requests     RentalRequest[]
+  rentals      Booking[] @relation("BookingRenter")
+  bookings     Booking[] @relation("BookingOwner")
 }
 
 model Session {
@@ -72,6 +79,7 @@ model Equipment {
   updatedAt   DateTime        @updatedAt
   saved       SavedEquipment[]
   requests    RentalRequest[]
+  bookings    Booking[]
   @@index([status, category, id])
   @@index([ownerId])
 }
@@ -105,8 +113,53 @@ model RentalRequest {
   quoteNotes   String?
   createdAt    DateTime      @default(now())
   updatedAt    DateTime      @updatedAt
+  booking      Booking?
   @@index([userId, createdAt])
   @@index([equipmentId])
+}
+
+// Agreed details are snapshots. Listing and profile edits must not change them.
+model Booking {
+  id                String        @id @default(cuid())
+  reference         String        @unique
+  requestId         String        @unique
+  request           RentalRequest @relation(fields: [requestId], references: [id])
+  renterId          String
+  renter            User          @relation("BookingRenter", fields: [renterId], references: [id])
+  ownerId           String?
+  owner             User?         @relation("BookingOwner", fields: [ownerId], references: [id])
+  equipmentId       Int?
+  equipment         Equipment?    @relation(fields: [equipmentId], references: [id])
+  title             String
+  service           String
+  equipmentCategory String?
+  capacity          String?
+  image             String        @default("")
+  equipmentLocation String?
+  operator          Boolean?
+  vendor            String
+  ownerName         String?
+  ownerEmail        String?
+  renterName        String
+  renterEmail       String
+  location          String
+  start             String
+  end               String
+  days              Int
+  agreedAmount      Float
+  currency          String        @default("NGN")
+  terms             String        @default("")
+  notes             String        @default("")
+  status            BookingStatus @default(AWAITING_CONFIRMATION)
+  acceptedAt        DateTime      @default(now())
+  imported          Boolean       @default(false)
+  reservedAt        DateTime?
+  reservationExpiresAt DateTime?
+  cancelledAt       DateTime?
+  @@index([renterId, acceptedAt])
+  @@index([ownerId, acceptedAt])
+  @@index([equipmentId])
+  @@index([equipmentId, status, reservationExpiresAt])
 }
 
 model WaitlistEntry {
